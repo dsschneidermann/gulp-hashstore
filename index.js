@@ -227,7 +227,7 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
       return callback(null, null)
     }
 
-    saveModuleStore(hashFile, hashStore, config)
+    saveModuleStore(hashFile, hashStore, config) // todo move down
 
     let log = config.log_print
     let base = config.base
@@ -251,20 +251,23 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
         })
         log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " not found")
       })
+      // todo: remove entries and save hashstore
     }
+    
+    // save hash store
 
     var formatDate = d => new Date(Date(d)).toLocaleDateString()
     var formatText = x => {
-      // TODO: This is all wrong
+      // TODO: May need fixing
       if (newInputFiles.some(x => x.file == x.file)) {
-        return chalk.green(formatDate(x.last_changed))
+        return chalk.green("new ") + chalk.magenta(formatDate(x.last_changed))
       }
       if (existingInputFiles.some(x => x.file == x.file)) {
         return chalk.magenta(formatDate(x.last_changed))
       }
       if (missingInputFiles.some(x => x.file == x.file)) {
-        if (x.input_last_checked) return chalk.red("not found")
-        return config.cleanUpFiles ? chalk.red("deleted") : chalk.red("not deleted")
+
+        return chalk.red("stale")
       }
       return null
     }
@@ -289,7 +292,7 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
         .reduce((map, obj) => {
           map[obj.file] = (obj.outputs || Array())
             .reduce((map2, obj2) => {
-              map2[obj2.file] = formatText(obj2)
+              map2[obj2.file] = formatText(obj) // not obj2
               return map2
             }, {})
           if (Object.keys(map[obj.file]).length == 0) {

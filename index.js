@@ -1,9 +1,9 @@
-const path = require("path")
-const fancylog = require("fancy-log")
-const chalk = require("chalk")
-const treeify = require("treeify")
-const crypto = require("crypto")
-const fs = require("fs")
+const path = require('path')
+const fancylog = require('fancy-log')
+const chalk = require('chalk')
+const treeify = require('treeify')
+const crypto = require('crypto')
+const fs = require('fs')
 
 const through = require('through2')
 const PluginError = require('plugin-error')
@@ -22,7 +22,8 @@ const _module_configs = {}
 const _module_current_datetime = Date.now()
 
 function sources(file,
-  { baseDir, invalidateObject, outputPostfixes = [], logger, verbose = false, logSummary = true, logTree = true, logOnlyChanged = true } = {}) {
+  { baseDir, invalidateObject, outputPostfixes = [], cleanUpFiles,
+    logger, verbose = false, logSummary = true, logTree = true, logOnlyChanged = false } = {}) {
   // process.on('unhandledRejection', r => console.log(r)) // for debugging
 
   let hashFile = file
@@ -31,7 +32,10 @@ function sources(file,
   }
 
   let config = createModuleConfig(hashFile,
-    { baseDir, invalidateObject, outputPostfixes, logger, verbose, logSummary, logTree, logOnlyChanged })
+    {
+      baseDir, invalidateObject, outputPostfixes, cleanUpFiles,
+      logger, verbose, logSummary, logTree, logOnlyChanged
+    })
   let hashStore = loadModuleStore(hashFile, config)
 
   let stream = through({ objectMode: true, allowHalfOpen: false }, function (file, encoding, callback) {
@@ -65,9 +69,9 @@ function sources(file,
         for (let i = 0, len = (foundInputFile.outputs || Array()).length; i < len; i++) {
           let existing = foundInputFile.outputs[i]
           let result_hash
-          if (fs.existsSync(existing.file)) {
+          if (fs.existsSync(getPath(base, existing.file))) {
             try {
-              result_hash = hashFunc(fs.readFileSync(existing.file))
+              result_hash = hashFunc(fs.readFileSync(getPath(base, existing.file)))
             } catch (err) {
             }
           }
@@ -80,26 +84,29 @@ function sources(file,
           }
         }
       }
-
-      if (outputFilesOK) {
-        // Nothing more to do
-        return callback(null)
-      }
-
-      log(PLUGIN_NAME + ": " + getPath(base, file.path) + chalk.green(" generated hash"))
-
+      
       // Create a new entry for the input file
-      let inputFileIndex = hashStore.inputs.indexOf(foundInputFile)
-      if (inputFileIndex != -1) hashStore.inputs.splice(inputFileIndex, 1)
-      hashStore.inputs.push({
+      let inputFile = {
         file: getPath(base, file.path),
         generated_hash: generated_hash,
-        last_changed: last_changed
-      })
+        last_changed: last_changed,
+      }
+      _module_state[hashFile].seenFiles.push(inputFile)
 
-      // Add property to stream and add to seen files collection
+      if (outputFilesOK) {
+        // Keep output files array for valid entries
+        inputFile.outputs = foundInputFile.outputs
+        return callback(null, null)
+      }
+
+      let inputFileIndex = hashStore.inputs.indexOf(foundInputFile)
+      if (inputFileIndex != -1) hashStore.inputs.splice(inputFileIndex, 1)
+      hashStore.inputs.push(inputFile)
+      
+      log(PLUGIN_NAME + ": " + getPath(base, file.path) + chalk.green(" generated hash"))
+
+      // Add property and allow to pipe to next
       file.__gulp_hashstore_source_path = file.path
-      _module_state[hashFile].seenFiles.push({ path: file.path })
       callback(null, file)
     }
   }, flushStateGen(hashFile))
@@ -114,8 +121,8 @@ function results(file, { outputPostfixes } = {}) {
     throw new PluginError(PLUGIN_NAME, "No file given as first parameter!")
   }
 
-  let config = loadModuleConfig(hashFile, { isOutputTracking: true })
-  let hashStore = loadModuleStore(hashFile, config)
+  let config = loadModuleConfig(hashFile)
+  let hashStore = loadModuleStore(hashFile, config, { isOutputTracking: true })
 
   if (hashStore && config) {
     // Allow config overrides for results() - not sure if this is needed or just superflous
@@ -171,10 +178,10 @@ function results(file, { outputPostfixes } = {}) {
           $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to find source for file: " + file.path + " - Are you missing hashstore.sources() in your pipe?"))
         }
         if (possibilities.length !== 1) {
-          $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to determine single source for file: " + file.path + " - Possibilities were: \r\n" + possibilities.map(x => x.path).join('\r\n')))
+          $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to determine single source for file: " + file.path + " - Possibilities were: \r\n" + possibilities.map(x => x.file).join('\r\n')))
         }
 
-        sourceFile = possibilities[0].path
+        sourceFile = possibilities[0].file
       }
 
       let log = config.log_print
@@ -210,70 +217,102 @@ function results(file, { outputPostfixes } = {}) {
 
 function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
   return function (callback) {
-    let config = loadModuleConfig(hashFile, { isOutputTracking })
-    let hashStore = loadModuleStore(hashFile, config)
 
-    if (!isOutputTracking && _module_state[hashFile].outputTrackingAttached) {
+    let config = loadModuleConfig(hashFile)
+    let hashStore = loadModuleStore(hashFile, config, { isOutputTracking })
+
+    if (!isOutputTracking && _module_state[hashFile].outputTracking) {
       // End early if output tracking is attached and this is not it -
       // flush will be called again when output ends
       return callback(null, null)
     }
 
-    saveModuleStore(hashFile, hashStore)
+    saveModuleStore(hashFile, hashStore, config)
 
-    var formatDate = d => new Date(Date(d)).toLocaleString()
-    var colorDate = d => {
-      if (d == _module_current_datetime) {
-        return str => chalk.green(str)
-      }
-      return str => chalk.magenta(str)
-    }
     let log = config.log_print
+    let base = config.base
+    if (!config.verbose) {
+      log = str => { }
+    }
 
-    let newInputFiles = hashStore.inputs.filter(x => x.last_changed == _module_current_datetime);
+    let existingInputFiles = _module_state[hashFile].seenFiles
+    let newInputFiles = _module_state[hashFile].seenFiles.filter(x => x.last_changed == _module_current_datetime)
+    let missingInputFiles = hashStore.inputs.filter(x => !fs.existsSync(getPath(base, x.file)))
+
+    console.log("exising:" + JSON.stringify(existingInputFiles.map(x => x.file)))
+    console.log("newInpu:" + JSON.stringify(newInputFiles.map(x => x.file)))
+    console.log("missing:" + JSON.stringify(missingInputFiles.map(x => x.file)))
+
+    if (config.cleanUpFiles) {
+      missingInputFiles.forEach(x => {
+        (x.outputs || Array()).forEach(y => {
+          log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " deleted")
+          fs.unlinkSync(getPath(base, y.file))
+        })
+        log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " not found")
+      })
+    }
+
+    var formatDate = d => new Date(Date(d)).toLocaleDateString()
+    var formatText = x => {
+      // TODO: This is all wrong
+      if (newInputFiles.some(x => x.file == x.file)) {
+        return chalk.green(formatDate(x.last_changed))
+      }
+      if (existingInputFiles.some(x => x.file == x.file)) {
+        return chalk.magenta(formatDate(x.last_changed))
+      }
+      if (missingInputFiles.some(x => x.file == x.file)) {
+        if (x.input_last_checked) return chalk.red("not found")
+        return config.cleanUpFiles ? chalk.red("deleted") : chalk.red("not deleted")
+      }
+      return null
+    }
+
+    // From this point, always log
+    log = config.log_print
 
     if (config.logTree) {
-      let root = hashStore.inputs
+      let filesToDisplay = existingInputFiles.concat(newInputFiles).concat(missingInputFiles)
       let description = "updated hashstore"
       if (config.logOnlyChanged) {
-        root = newInputFiles
+        filesToDisplay = newInputFiles.concat(missingInputFiles)
       }
-      if (newInputFiles.length == hashStore.inputs) {
+      if (newInputFiles.length == hashStore.inputs.length) {
         description = "generated hashstore"
       }
       else if (newInputFiles.length == 0) {
         description = "no change to hashstore"
       }
 
-      let filesDisplay = root
+      let treeObject = filesToDisplay
         .reduce((map, obj) => {
           map[obj.file] = (obj.outputs || Array())
             .reduce((map2, obj2) => {
-              var d = obj2.last_changed;
-              map2[obj2.file] = colorDate(d)(formatDate(d))
+              map2[obj2.file] = formatText(obj2)
               return map2
             }, {})
           if (Object.keys(map[obj.file]).length == 0) {
-            var d = obj.last_changed;
-            map[obj.file] = colorDate(d)(formatDate(d))
+            map[obj.file] = formatText(obj)
           }
           return map
         }, {})
 
-      let tree = treeify.asTree(filesDisplay, true)
+      let tree = treeify.asTree(treeObject, true)
       if (tree) {
         log(PLUGIN_NAME + ": " + chalk.white(description) + "\r\n" + chalk.white(hashFile) + "\r\n" + tree)
       }
     }
 
+    // TODO: Summary is also wrong..
     if (config.logSummary) {
-      let inputFilesCountText = chalk.magenta(hashStore.inputs.length) + " (0 new)"
+      let inputFilesCountText = chalk.magenta(existingInputFiles.length) + " (0 new)"
       if (newInputFiles.length != 0) {
-        inputFilesCountText = chalk.green(hashStore.inputs.length + " (" + newInputFiles.length + " new)")
+        inputFilesCountText = chalk.green(existingInputFiles.length + " (" + newInputFiles.length + " new)")
       }
 
       let inputFilesText = "\r\n\t\tinputs hashed: " + inputFilesCountText
-      let outputFilesCount = hashStore.inputs.reduce((count, obj) => {
+      let outputFilesCount = existingInputFiles.reduce((count, obj) => {
         return count + (obj.outputs || Array()).length
       }, 0)
       let outputFilesText = ''
@@ -287,13 +326,12 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
 
 function loadModuleConfig(hashFile, { isOutputTracking = false } = {}) {
   // Update property (sticky to true)
-  _module_configs[hashFile].isOutputTracking = _module_configs[hashFile].isOutputTracking || isOutputTracking
+  _module_state[hashFile].outputTracking = _module_state[hashFile].outputTracking || isOutputTracking
+
   return _module_configs[hashFile]
 }
 
 function createModuleConfig(hashFile, config) {
-  if (typeof (hashFile) !== 'string') return null
-
   let log_print = fancylog
   if (config.logger === null) {
     log_print = str => { }
@@ -308,11 +346,11 @@ function createModuleConfig(hashFile, config) {
     log_print: log_print,
     base: base,
     outputPostfixes: config.outputPostfixes,
+    cleanUpFiles: config.cleanUpFiles,
     verbose: config.verbose,
     logSummary: config.logSummary,
     logTree: config.logTree,
     logOnlyChanged: config.logOnlyChanged,
-    isOutputTracking: false // default, can change when we discover later
   }
 
   let invalidateObject = config.invalidateObject
@@ -328,9 +366,7 @@ function createModuleConfig(hashFile, config) {
   return _module_configs[hashFile]
 }
 
-function loadModuleStore(hashFile, config) {
-  if (typeof (hashFile) !== 'string') return null
-
+function loadModuleStore(hashFile, config, { isOutputTracking = false } = {}) {
   if (!_module_state[hashFile]) {
     _module_state[hashFile] = {
       seenFiles: Array()
@@ -339,11 +375,11 @@ function loadModuleStore(hashFile, config) {
 
   if (!_module_hashStores[hashFile]) {
     let hashStore = {}
-    if (fs.existsSync(hashFile)) {
+    _module_hashStores[hashFile] = {}
+    if (fs.existsSync(getPath(base, hashFile))) {
       try {
-        _module_hashStores[hashFile] = JSON.parse(fs.readFileSync(hashFile))
+        _module_hashStores[hashFile] = JSON.parse(fs.readFileSync(getPath(base, hashFile)))
       } catch (err) {
-        _module_hashStores[hashFile] = {}
       }
     }
     // Explicit assignment in order to remove other top-level properties
@@ -367,9 +403,9 @@ function loadModuleStore(hashFile, config) {
     }
   }
 
-  if (config.isOutputTracking) {
+  if (isOutputTracking) {
     // Set module state that output tracking is attached for the hashFile
-    _module_state[hashFile].outputTrackingAttached = true
+    _module_state[hashFile].outputTracking = true
 
     // If store was saved last time without output tracking, we have to invalidate the
     // list of input files.
@@ -386,9 +422,9 @@ function loadModuleStore(hashFile, config) {
   return _module_hashStores[hashFile]
 }
 
-function saveModuleStore(hashFile, hashStore) {
+function saveModuleStore(hashFile, hashStore, config) {
   ensureDirectoryExistence(hashFile)
-  fs.writeFileSync(hashFile, JSON.stringify(hashStore, null, 2))
+  fs.writeFileSync(getPath(config.base, hashFile), JSON.stringify(hashStore, null, 2))
 }
 
 function hashFunc(input) {
@@ -429,42 +465,42 @@ function getLongestSharedDir(array) {
   }
 }
 
-function whereLongerFileName(filepath, seenFiles) {
+function whereLongerFileName(filepath, hashStore) {
   let len = path.basename(filepath, path.extname(filepath)).length
-  return seenFiles.filter(x => len >= path.basename(x.path, path.extname(x.path)).length)
+  return hashStore.filter(x => len >= path.basename(x.file, path.extname(x.file)).length)
 }
 
-function whereLongestSharedDir(filepath, seenFiles) {
-  let possibilities = seenFiles.map(x => {
+function whereLongestSharedDir(filepath, hashStore) {
+  let possibilities = hashStore.map(x => {
     return {
-      seenFile: x,
-      matchCount: getLongestSharedDir([filepath, x.path]).length
+      input: x,
+      matchCount: getLongestSharedDir([filepath, x.file]).length
     }
   })
   let maxMatchCount = Math.max.apply(null, possibilities.map(x => x.matchCount))
-  return possibilities.filter(x => x.matchCount === maxMatchCount).map(x => x.seenFile)
+  return possibilities.filter(x => x.matchCount === maxMatchCount).map(x => x.input)
 }
 
-function whereLongestSharedFileName(filepath, seenFiles) {
-  let possibilities = seenFiles.map(x => {
+function whereLongestSharedFileName(filepath, hashStore) {
+  let possibilities = hashStore.map(x => {
     return {
-      seenFile: x,
-      lengthCount: getLongestSharedFileName([filepath, x.path]).length
+      input: x,
+      lengthCount: getLongestSharedFileName([filepath, x.file]).length
     }
   })
   let maxLengthCount = Math.max.apply(null, possibilities.map(x => x.lengthCount))
-  return possibilities.filter(x => x.lengthCount === maxLengthCount).map(x => x.seenFile)
+  return possibilities.filter(x => x.lengthCount === maxLengthCount).map(x => x.input)
 }
 
-function whereShortestFileName(filepath, seenFiles) {
-  let possibilities = seenFiles.map(x => {
+function whereShortestFileName(filepath, hashStore) {
+  let possibilities = hashStore.map(x => {
     return {
-      seenFile: x,
-      lengthCount: path.basename(x.path, path.extname(x.path)).length
+      input: x,
+      lengthCount: path.basename(x.file, path.extname(x.file)).length
     }
   })
   let minLengthCount = Math.min.apply(null, possibilities.map(x => x.lengthCount))
-  return possibilities.filter(x => x.lengthCount === minLengthCount).map(x => x.seenFile)
+  return possibilities.filter(x => x.lengthCount === minLengthCount).map(x => x.input)
 }
 
 function safeTrim(str, pattern) {

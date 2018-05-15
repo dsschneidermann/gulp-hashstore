@@ -10,20 +10,14 @@ const PluginError = require('plugin-error')
 
 const PLUGIN_NAME = 'gulp-hashstore'
 
-//
-// TODO: On init, shall tag all existing entries in file (keep in a const dictionary [file, [in_file, true]])
-// While running, shall remove the tags that are seen (from the dict [hashfile, [in_file, false]])
-// After running, it is possible to clean up all files that have not been part of results (as flush action?)
-// 
-
-const _module_hashStores = {}
+const _module_hashstores = {}
 const _module_state = {}
 const _module_configs = {}
 const _module_current_datetime = Date.now()
 
 function sources(file,
-  { baseDir, invalidateObject, outputPostfixes = [], cleanUpFiles,
-    logger, verbose = false, logSummary = true, logTree = true, logOnlyChanged = false } = {}) {
+  { baseDir, invalidateObject, outputPostfixes = [], cleanMissingInputs = true, strictSinglePipe = true,
+    logger, verbose = false, logSummary = true, logTree = true, logOnlyChanged = true } = {}) {
   // process.on('unhandledRejection', r => console.log(r)) // for debugging
 
   let hashFile = file
@@ -33,10 +27,10 @@ function sources(file,
 
   let config = createModuleConfig(hashFile,
     {
-      baseDir, invalidateObject, outputPostfixes, cleanUpFiles,
+      baseDir, invalidateObject, outputPostfixes, cleanMissingInputs, strictSinglePipe,
       logger, verbose, logSummary, logTree, logOnlyChanged
     })
-  let hashStore = loadModuleStore(hashFile, config)
+  let hashstore = loadModuleStore(hashFile, config)
 
   let stream = through({ objectMode: true, allowHalfOpen: false }, function (file, encoding, callback) {
     $gulp = this
@@ -59,7 +53,7 @@ function sources(file,
       let generated_hash = hashFunc(file._contents)
       let last_changed = _module_current_datetime
 
-      let foundInputFile = hashStore.inputs.find(x => x.file === getPath(base, file.path))
+      let foundInputFile = hashstore.inputs.find(x => x.file === getPath(base, file.path))
       if (foundInputFile && foundInputFile.generated_hash === generated_hash) {
         // Input file is a match
         last_changed = foundInputFile.last_changed || _module_current_datetime
@@ -84,7 +78,7 @@ function sources(file,
           }
         }
       }
-      
+
       // Create a new entry for the input file
       let inputFile = {
         file: getPath(base, file.path),
@@ -99,10 +93,10 @@ function sources(file,
         return callback(null, null)
       }
 
-      let inputFileIndex = hashStore.inputs.indexOf(foundInputFile)
-      if (inputFileIndex != -1) hashStore.inputs.splice(inputFileIndex, 1)
-      hashStore.inputs.push(inputFile)
-      
+      let inputFileIndex = hashstore.inputs.indexOf(foundInputFile)
+      if (inputFileIndex != -1) hashstore.inputs.splice(inputFileIndex, 1)
+      hashstore.inputs.push(inputFile)
+
       log(PLUGIN_NAME + ": " + getPath(base, file.path) + chalk.green(" generated hash"))
 
       // Add property and allow to pipe to next
@@ -122,9 +116,9 @@ function results(file, { outputPostfixes } = {}) {
   }
 
   let config = loadModuleConfig(hashFile)
-  let hashStore = loadModuleStore(hashFile, config, { isOutputTracking: true })
+  let hashstore = loadModuleStore(hashFile, config, { isOutputTracking: true })
 
-  if (hashStore && config) {
+  if (hashstore && config) {
     // Allow config overrides for results() - not sure if this is needed or just superflous
     if (outputPostfixes) {
       config.outputPostfixes = outputPostfixes
@@ -191,7 +185,7 @@ function results(file, { outputPostfixes } = {}) {
       }
 
       // Get origin source path and find the entry for it
-      let foundInputFile = hashStore.inputs.find(x => x.file === getPath(base, sourceFile))
+      let foundInputFile = hashstore.inputs.find(x => x.file === getPath(base, sourceFile))
       if (!foundInputFile) {
         $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to find input entry for source: " + sourceFile + " - Did this file skip hashstore.sources() in your pipe?"))
       }
@@ -219,7 +213,7 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
   return function (callback) {
 
     let config = loadModuleConfig(hashFile)
-    let hashStore = loadModuleStore(hashFile, config, { isOutputTracking })
+    let hashstore = loadModuleStore(hashFile, config, { isOutputTracking })
 
     if (!isOutputTracking && _module_state[hashFile].outputTracking) {
       // End early if output tracking is attached and this is not it -
@@ -233,64 +227,65 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
       log = str => { }
     }
 
-    let existingInputFiles = _module_state[hashFile].seenFiles
-    let newInputFiles = _module_state[hashFile].seenFiles.filter(x => x.last_changed == _module_current_datetime)
-    let missingInputFiles = hashStore.inputs.filter(x => !fs.existsSync(getPath(base, x.file)))
+    let deepCopyArray = (list) => JSON.parse(JSON.stringify(list))
+
+    let seenInputFiles = deepCopyArray(_module_state[hashFile].seenFiles)
+    let newInputFiles = deepCopyArray(_module_state[hashFile].seenFiles.filter(x => x.last_changed == _module_current_datetime))
+    let missingInputFiles = Array()
+    if (config.strictSinglePipe) {
+      missingInputFiles = deepCopyArray(hashstore.inputs.filter(x => !_module_state[hashFile].seenFiles.some(y => x.file === y.file)))
+    } else {
+      mssingInputFiles = deepCopyArray(hashstore.inputs.filter(x => !fs.existsSync(getPath(base, x.file))))
+    }
+    
     let removedStaleCount = 0
+    let cleanedInputFiles = deepCopyArray(missingInputFiles)
 
-    // console.log("exising:" + JSON.stringify(existingInputFiles.map(x => x.file)))
-    // console.log("newInpu:" + JSON.stringify(newInputFiles.map(x => x.file)))
-    // console.log("missing:" + JSON.stringify(missingInputFiles.map(x => x.file)))
+    if (config.cleanMissingInputs) {
+      cleanedInputFiles.forEach(cleanedInput => {
+        let outputs = cleanedInput.outputs || Array()
+        log(PLUGIN_NAME + ": " + chalk.red(getPath(base, cleanedInput.file)) + " not found")
 
-    if (config.cleanUpFiles) {
-      missingInputFiles.forEach(missingInput => {
-        let outputs = missingInput.outputs || Array()
-        outputs.forEach(staleOutput => {
-          log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " deleted")
+        outputs.forEach(stale => {
           try {
-            if (fs.existsSync(getPath(base, staleOutput.file))) {
-              fs.unlinkSync(getPath(base, staleOutput.file))
+            if (fs.existsSync(getPath(base, stale.file))) {
+              fs.unlinkSync(getPath(base, stale.file))
+              log(PLUGIN_NAME + ": " + chalk.red(getPath(base, stale.file)) + " deleted")
+              removedStaleCount++
             }
-            missingInput.outputs = missingInput.outputs.filter(x => x != output)
-            removedStaleCount++
+            // Mutate array to store state of removed output files
+            cleanedInput.outputs = cleanedInput.outputs.filter(x => x != stale)
           } catch (err) {
-            config.log_print(PLUGIN_NAME + ": error deleting " + chalk.red(getPath(base, existing.file)) + " " + err)
+            config.log_print(PLUGIN_NAME + ": error deleting " + chalk.red(getPath(base, stale.file)) + " " + err)
           }
         })
-        // Cleanup removed entries
-        hashStore.inputs = hashStore.inputs.filter(x => { 
-          let stale = missingInputFiles.find(y => y == x)
-          return (stale.outputs || Array()).length == 0
-        })
-
-        log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " not found")
+        // Remove all cleaned entries from hashstore, skipping any that had error
+        hashstore.inputs = hashstore.inputs.filter(x =>
+          !cleanedInputFiles.find(y => x.file === y.file && (y.outputs || Array()).length == 0))
       })
     }
 
-    saveModuleStore(hashFile, hashStore, config)
+    saveModuleStore(hashFile, hashstore, config)
 
     var formatDate = d => new Date(Date(d)).toLocaleDateString()
     var formatText = x => {
-      if (newInputFiles.some(x => x.file == x.file)) {
-        return chalk.green("new ") + chalk.magenta(formatDate(x.last_changed))        
+      if (newInputFiles.some(y => x.file === y.file)) {
+        return chalk.green("new ") + chalk.magenta(formatDate(x.last_changed))
       }
-      if (existingInputFiles.some(x => x.file == x.file)) {
+      if (seenInputFiles.some(y => x.file === y.file)) {
         return chalk.magenta(formatDate(x.last_changed))
       }
-      if (missingInputFiles.some(x => x.file == x.file)) {
-        return chalk.red("stale")        
+      if (missingInputFiles.some(y => x.file === y.file)) {
+        return chalk.red("stale")
       }
       return null
     }
 
     if (config.logTree) {
-      let filesToDisplay = existingInputFiles.concat(newInputFiles).concat(missingInputFiles)
+      let filesToDisplay = seenInputFiles.concat(newInputFiles).concat(missingInputFiles)
       let description = "updated hashstore"
       if (config.logOnlyChanged) {
         filesToDisplay = newInputFiles.concat(missingInputFiles)
-      }
-      if (newInputFiles.length == hashStore.inputs.length) {
-        description = "created hashstore"
       }
       else if (newInputFiles.length == 0) {
         description = "no change to hashstore"
@@ -317,17 +312,23 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
     }
 
     if (config.logSummary) {
-      let inputFilesCountText = chalk.magenta(existingInputFiles.length) + " (0 new)"
+      let inputFilesCountText = chalk.magenta(seenInputFiles.length) + " (0 new)"
       if (newInputFiles.length != 0) {
-        inputFilesCountText = chalk.green(existingInputFiles.length + " (" + newInputFiles.length + " new)")
+        inputFilesCountText = chalk.magenta(seenInputFiles.length) + chalk.green(" (" + newInputFiles.length + " new)")
+      }
+      let inputFilesText = "\r\n\t\tinputs hashed: " + inputFilesCountText
+
+      let outputFilesText = ''
+      let outputFilesCount = seenInputFiles.reduce((count, obj) => count + (obj.outputs || Array()).length, 0)
+      if (outputFilesCount > 0) {
+        let outputFilesCountText = chalk.magenta(outputFilesCount) + " (0 new)"
+        if (newInputFiles.length != 0) {
+          let newOutputFilesCount = newInputFiles.reduce((count, obj) => count + (obj.outputs || Array()).length, 0)
+          outputFilesCountText = chalk.magenta(outputFilesCount) + chalk.green(" (" + newOutputFilesCount + " new)")
+        }
+        outputFilesText = "\r\n\t\toutputs hashed: " + outputFilesCountText
       }
 
-      let inputFilesText = "\r\n\t\tinputs hashed: " + inputFilesCountText
-      let outputFilesCount = existingInputFiles.reduce((count, obj) => {
-        return count + (obj.outputs || Array()).length
-      }, 0)
-      let outputFilesText = ''
-      if (outputFilesCount > 0) outputFilesText = "\r\n\t\toutputs hashed: " + chalk.magenta(outputFilesCount)
       let removedStaleText = ''
       if (removedStaleCount > 0) removedStaleText = "\r\n\t\tstale files removed: " + chalk.red(removedStaleCount)
       config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + inputFilesText + outputFilesText + removedStaleText)
@@ -358,12 +359,7 @@ function createModuleConfig(hashFile, config) {
   let moduleConfig = {
     log_print: log_print,
     base: base,
-    outputPostfixes: config.outputPostfixes,
-    cleanUpFiles: config.cleanUpFiles,
-    verbose: config.verbose,
-    logSummary: config.logSummary,
-    logTree: config.logTree,
-    logOnlyChanged: config.logOnlyChanged,
+    ...config
   }
 
   let invalidateObject = config.invalidateObject
@@ -386,33 +382,36 @@ function loadModuleStore(hashFile, config, { isOutputTracking = false } = {}) {
     }
   }
 
-  if (!_module_hashStores[hashFile]) {
-    let hashStore = {}
-    _module_hashStores[hashFile] = {}
+  if (!_module_hashstores[hashFile]) {
+    let hashstore = {}
+    _module_hashstores[hashFile] = {}
     if (fs.existsSync(getPath(base, hashFile))) {
       try {
-        _module_hashStores[hashFile] = JSON.parse(fs.readFileSync(getPath(base, hashFile)))
+        _module_hashstores[hashFile] = JSON.parse(fs.readFileSync(getPath(base, hashFile)))
       } catch (err) {
       }
     }
     // Explicit assignment in order to remove other top-level properties
-    hashStore.version = '0.2.0'
-    hashStore.invalidateObjectHash = _module_hashStores[hashFile].invalidateObjectHash
-    hashStore.outputTrackingEnabled = _module_hashStores[hashFile].outputTrackingEnabled
-    hashStore.inputs = _module_hashStores[hashFile].inputs || Array()
+    hashstore.version = '0.2.0'
+    hashstore.invalidateObjectHash = _module_hashstores[hashFile].invalidateObjectHash
+    hashstore.outputTrackingEnabled = _module_hashstores[hashFile].outputTrackingEnabled
+    hashstore.inputs = _module_hashstores[hashFile].inputs || Array()
 
     // Store new object as store
-    _module_hashStores[hashFile] = hashStore
+    _module_hashstores[hashFile] = hashstore
+  }
+
+  if (!Array.isArray(_module_hashstores[hashFile].inputs)) {
+    _module_hashstores[hashFile].inputs = Array()
   }
 
   // Clean state at startup if invalidation hash is different
-  if (config.invalidateObjectHash) {
-    if (_module_hashStores[hashFile].invalidateObjectHash !== config.invalidateObjectHash) {
-      if (_module_hashStores[hashFile].invalidateObjectHash) {
-        config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + " is reset due to invalidation change")
-      }
-      _module_hashStores[hashFile].inputs = Array()
-      _module_hashStores[hashFile].invalidateObjectHash = config.invalidateObjectHash
+  if (config.invalidateObjectHash && _module_hashstores[hashFile].invalidateObjectHash !== config.invalidateObjectHash) {
+    _module_hashstores[hashFile].invalidateObjectHash = config.invalidateObjectHash
+
+    if (_module_hashstores[hashFile].inputs.length > 0) {
+      _module_hashstores[hashFile].inputs = Array()
+      config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + " reset due to invalidation change")
     }
   }
 
@@ -422,22 +421,19 @@ function loadModuleStore(hashFile, config, { isOutputTracking = false } = {}) {
 
     // If store was saved last time without output tracking, we have to invalidate the
     // list of input files.
-    if (!_module_hashStores[hashFile].outputTrackingEnabled) {
-      // Note: This is a blunt instrument that does not allow mixing outputs and non-outputs in
-      // the same hashstore. We could do invalidation on per-item basis during streaming, but
-      // it would be more moving parts for only supporting a very theoretical use-case.
-      config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + " is reset to add results")
-      _module_hashStores[hashFile].inputs = Array()
+    if (!_module_hashstores[hashFile].outputTrackingEnabled && _module_hashstores[hashFile].inputs.length > 0) {
+      _module_hashstores[hashFile].inputs = Array()
+      config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + " reset to add output tracking")
     }
-    _module_hashStores[hashFile].outputTrackingEnabled = true
+    _module_hashstores[hashFile].outputTrackingEnabled = true
   }
 
-  return _module_hashStores[hashFile]
+  return _module_hashstores[hashFile]
 }
 
-function saveModuleStore(hashFile, hashStore, config) {
+function saveModuleStore(hashFile, hashstore, config) {
   ensureDirectoryExistence(hashFile)
-  fs.writeFileSync(getPath(config.base, hashFile), JSON.stringify(hashStore, null, 2))
+  fs.writeFileSync(getPath(config.base, hashFile), JSON.stringify(hashstore, null, 2))
 }
 
 function hashFunc(input) {
@@ -478,13 +474,13 @@ function getLongestSharedDir(array) {
   }
 }
 
-function whereLongerFileName(filepath, hashStore) {
+function whereLongerFileName(filepath, hashstore) {
   let len = path.basename(filepath, path.extname(filepath)).length
-  return hashStore.filter(x => len >= path.basename(x.file, path.extname(x.file)).length)
+  return hashstore.filter(x => len >= path.basename(x.file, path.extname(x.file)).length)
 }
 
-function whereLongestSharedDir(filepath, hashStore) {
-  let possibilities = hashStore.map(x => {
+function whereLongestSharedDir(filepath, hashstore) {
+  let possibilities = hashstore.map(x => {
     return {
       input: x,
       matchCount: getLongestSharedDir([filepath, x.file]).length
@@ -494,8 +490,8 @@ function whereLongestSharedDir(filepath, hashStore) {
   return possibilities.filter(x => x.matchCount === maxMatchCount).map(x => x.input)
 }
 
-function whereLongestSharedFileName(filepath, hashStore) {
-  let possibilities = hashStore.map(x => {
+function whereLongestSharedFileName(filepath, hashstore) {
+  let possibilities = hashstore.map(x => {
     return {
       input: x,
       lengthCount: getLongestSharedFileName([filepath, x.file]).length
@@ -505,8 +501,8 @@ function whereLongestSharedFileName(filepath, hashStore) {
   return possibilities.filter(x => x.lengthCount === maxLengthCount).map(x => x.input)
 }
 
-function whereShortestFileName(filepath, hashStore) {
-  let possibilities = hashStore.map(x => {
+function whereShortestFileName(filepath, hashstore) {
+  let possibilities = hashstore.map(x => {
     return {
       input: x,
       lengthCount: path.basename(x.file, path.extname(x.file)).length

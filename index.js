@@ -227,8 +227,6 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
       return callback(null, null)
     }
 
-    saveModuleStore(hashFile, hashStore, config) // todo move down
-
     let log = config.log_print
     let base = config.base
     if (!config.verbose) {
@@ -238,42 +236,52 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
     let existingInputFiles = _module_state[hashFile].seenFiles
     let newInputFiles = _module_state[hashFile].seenFiles.filter(x => x.last_changed == _module_current_datetime)
     let missingInputFiles = hashStore.inputs.filter(x => !fs.existsSync(getPath(base, x.file)))
+    let removedStaleCount = 0
 
-    console.log("exising:" + JSON.stringify(existingInputFiles.map(x => x.file)))
-    console.log("newInpu:" + JSON.stringify(newInputFiles.map(x => x.file)))
-    console.log("missing:" + JSON.stringify(missingInputFiles.map(x => x.file)))
+    // console.log("exising:" + JSON.stringify(existingInputFiles.map(x => x.file)))
+    // console.log("newInpu:" + JSON.stringify(newInputFiles.map(x => x.file)))
+    // console.log("missing:" + JSON.stringify(missingInputFiles.map(x => x.file)))
 
     if (config.cleanUpFiles) {
-      missingInputFiles.forEach(x => {
-        (x.outputs || Array()).forEach(y => {
+      missingInputFiles.forEach(missingInput => {
+        let outputs = missingInput.outputs || Array()
+        outputs.forEach(staleOutput => {
           log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " deleted")
-          fs.unlinkSync(getPath(base, y.file))
+          try {
+            if (fs.existsSync(getPath(base, staleOutput.file))) {
+              fs.unlinkSync(getPath(base, staleOutput.file))
+            }
+            missingInput.outputs = missingInput.outputs.filter(x => x != output)
+            removedStaleCount++
+          } catch (err) {
+            config.log_print(PLUGIN_NAME + ": error deleting " + chalk.red(getPath(base, existing.file)) + " " + err)
+          }
         })
+        // Cleanup removed entries
+        hashStore.inputs = hashStore.inputs.filter(x => { 
+          let stale = missingInputFiles.find(y => y == x)
+          return (stale.outputs || Array()).length == 0
+        })
+
         log(PLUGIN_NAME + ": " + chalk.red(getPath(base, existing.file)) + " not found")
       })
-      // todo: remove entries and save hashstore
     }
-    
-    // save hash store
+
+    saveModuleStore(hashFile, hashStore, config)
 
     var formatDate = d => new Date(Date(d)).toLocaleDateString()
     var formatText = x => {
-      // TODO: May need fixing
       if (newInputFiles.some(x => x.file == x.file)) {
-        return chalk.green("new ") + chalk.magenta(formatDate(x.last_changed))
+        return chalk.green("new ") + chalk.magenta(formatDate(x.last_changed))        
       }
       if (existingInputFiles.some(x => x.file == x.file)) {
         return chalk.magenta(formatDate(x.last_changed))
       }
       if (missingInputFiles.some(x => x.file == x.file)) {
-
-        return chalk.red("stale")
+        return chalk.red("stale")        
       }
       return null
     }
-
-    // From this point, always log
-    log = config.log_print
 
     if (config.logTree) {
       let filesToDisplay = existingInputFiles.concat(newInputFiles).concat(missingInputFiles)
@@ -282,32 +290,32 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
         filesToDisplay = newInputFiles.concat(missingInputFiles)
       }
       if (newInputFiles.length == hashStore.inputs.length) {
-        description = "generated hashstore"
+        description = "created hashstore"
       }
       else if (newInputFiles.length == 0) {
         description = "no change to hashstore"
       }
 
       let treeObject = filesToDisplay
-        .reduce((map, obj) => {
-          map[obj.file] = (obj.outputs || Array())
-            .reduce((map2, obj2) => {
-              map2[obj2.file] = formatText(obj) // not obj2
+        .reduce((map, input) => {
+          map[input.file] = (input.outputs || Array())
+            .reduce((map2, output) => {
+              // Format text from the input file, easier this way
+              map2[output.file] = formatText(input)
               return map2
             }, {})
-          if (Object.keys(map[obj.file]).length == 0) {
-            map[obj.file] = formatText(obj)
+          if (Object.keys(map[input.file]).length == 0) {
+            map[input.file] = formatText(input)
           }
           return map
         }, {})
 
       let tree = treeify.asTree(treeObject, true)
       if (tree) {
-        log(PLUGIN_NAME + ": " + chalk.white(description) + "\r\n" + chalk.white(hashFile) + "\r\n" + tree)
+        config.log_print(PLUGIN_NAME + ": " + chalk.white(description) + "\r\n" + chalk.white(hashFile) + "\r\n" + tree)
       }
     }
 
-    // TODO: Summary is also wrong..
     if (config.logSummary) {
       let inputFilesCountText = chalk.magenta(existingInputFiles.length) + " (0 new)"
       if (newInputFiles.length != 0) {
@@ -320,7 +328,9 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
       }, 0)
       let outputFilesText = ''
       if (outputFilesCount > 0) outputFilesText = "\r\n\t\toutputs hashed: " + chalk.magenta(outputFilesCount)
-      log(PLUGIN_NAME + ": " + chalk.white(hashFile) + inputFilesText + outputFilesText)
+      let removedStaleText = ''
+      if (removedStaleCount > 0) removedStaleText = "\r\n\t\tstale files removed: " + chalk.red(removedStaleCount)
+      config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + inputFilesText + outputFilesText + removedStaleText)
     }
 
     callback(null, null)

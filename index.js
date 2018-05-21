@@ -472,6 +472,7 @@ function getLongestSharedDir(array) {
       }
     }
   }
+  return pathParts[0]
 }
 
 function whereLongerFileName(filepath, hashstore) {

@@ -129,7 +129,7 @@ function results(file, { outputPostfixes } = {}) {
   if (outputPostfixes && outputPostfixes.length) {
     outputPostfixes.forEach(str => {
       if (typeof (str) !== 'string') {
-        throw new PluginError(PLUGIN_NAME, "outputPostfixes option must be an array of strings but was:\r\n" +
+        throw new PluginError(PLUGIN_NAME, "outputPostfixes option must be an array of strings but was:\n" +
           JSON.stringify(outputPostfixes))
       }
     })
@@ -172,7 +172,7 @@ function results(file, { outputPostfixes } = {}) {
           $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to find source for file: " + file.path + " - Are you missing hashstore.sources() in your pipe?"))
         }
         if (possibilities.length !== 1) {
-          $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to determine single source for file: " + file.path + " - Possibilities were: \r\n" + possibilities.map(x => x.file).join('\r\n')))
+          $gulp.emit('error', new PluginError(PLUGIN_NAME, "Not able to determine single source for file: " + file.path + " - Possibilities were: \n" + possibilities.map(x => x.file).join('\n')))
         }
 
         sourceFile = possibilities[0].file
@@ -307,7 +307,7 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
 
       let tree = treeify.asTree(treeObject, true)
       if (tree) {
-        config.log_print(PLUGIN_NAME + ": " + chalk.white(description) + "\r\n" + chalk.white(hashFile) + "\r\n" + tree)
+        config.log_print(PLUGIN_NAME + ": " + chalk.white(description) + "\n" + chalk.white(hashFile) + "\n" + tree)
       }
     }
 
@@ -316,7 +316,7 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
       if (newInputFiles.length != 0) {
         inputFilesCountText = chalk.magenta(seenInputFiles.length) + chalk.green(" (" + newInputFiles.length + " new)")
       }
-      let inputFilesText = "\r\n\t\tinputs hashed: " + inputFilesCountText
+      let inputFilesText = "\n\t\tinputs hashed: " + inputFilesCountText
 
       let outputFilesText = ''
       let outputFilesCount = seenInputFiles.reduce((count, obj) => count + (obj.outputs || Array()).length, 0)
@@ -326,11 +326,11 @@ function flushStateGen(hashFile, { isOutputTracking = false } = {}) {
           let newOutputFilesCount = newInputFiles.reduce((count, obj) => count + (obj.outputs || Array()).length, 0)
           outputFilesCountText = chalk.magenta(outputFilesCount) + chalk.green(" (" + newOutputFilesCount + " new)")
         }
-        outputFilesText = "\r\n\t\toutputs hashed: " + outputFilesCountText
+        outputFilesText = "\n\t\toutputs hashed: " + outputFilesCountText
       }
 
       let removedStaleText = ''
-      if (removedStaleCount > 0) removedStaleText = "\r\n\t\tstale files removed: " + chalk.red(removedStaleCount)
+      if (removedStaleCount > 0) removedStaleText = "\n\t\tstale files removed: " + chalk.red(removedStaleCount)
       config.log_print(PLUGIN_NAME + ": " + chalk.white(hashFile) + inputFilesText + outputFilesText + removedStaleText)
     }
 

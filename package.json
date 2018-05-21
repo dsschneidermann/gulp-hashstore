@@ -1,6 +1,6 @@
 {
   "name": "gulp-hashstore",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Store sha1 hashes for files and filter from pipe",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
